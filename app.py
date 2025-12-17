@@ -11,192 +11,179 @@ from sklearn.metrics import accuracy_score
 st.set_page_config(
     page_title="Thyroid Health Predictor",
     page_icon="🩺",
-    layout="wide",
-    initial_sidebar_state="expanded"
+    layout="wide"
 )
 
-# --- CSS for User Friendly Look ---
-st.markdown("""
-<style>
-    .main-header {font-size: 2.5rem; color: #4F8BF9; text-align: center; margin-bottom: 20px;}
-    .sub-header {font-size: 1.5rem; color: #444; margin-top: 20px;}
-    .report-box {background-color: #f0f2f6; padding: 20px; border-radius: 10px; border-left: 5px solid #4F8BF9;}
-    .stButton>button {width: 100%; background-color: #4F8BF9; color: white; font-weight: bold;}
-</style>
-""", unsafe_allow_html=True)
-
-# --- 1. Data Loading & Training Engine ---
+# --- Robust Data Loading Function ---
 @st.cache_resource
-def build_model():
+def load_and_train():
     try:
-        # Load Data
+        # 1. Load Data
         df = pd.read_csv('Thyroid-Dataset.csv')
         
-        # preprocessing: Drop ID-like columns
+        # 2. Normalize Column Names (lowercase, strip spaces)
+        df.columns = [c.lower().strip() for c in df.columns]
+        
+        # 3. Drop ID columns
         if 'referral source' in df.columns:
             df = df.drop(['referral source'], axis=1)
 
-        # 1. Clean Sex Column
-        df['sex'] = df['sex'].map({'F': 0, 'M': 1})
-        df['sex'] = df['sex'].fillna(0)  # Default to Female if unknown
+        # 4. Force Numeric Conversion (Crucial for avoiding '?' errors)
+        # We explicitly list potential numeric columns
+        numeric_candidates = ['age', 'tsh', 't3', 'tt4', 't4u', 'fti']
+        for col in numeric_candidates:
+            if col in df.columns:
+                # errors='coerce' turns '?' and text into NaN (numbers)
+                df[col] = pd.to_numeric(df[col], errors='coerce')
 
-        # 2. Clean Boolean Columns (ensure they are 0/1 integers)
-        bool_cols = df.select_dtypes(include=['bool']).columns
-        for col in bool_cols:
-            df[col] = df[col].astype(int)
+        # 5. Clean 'Sex' Column
+        if 'sex' in df.columns:
+            df['sex'] = df['sex'].map({'F': 0, 'M': 1, 'f': 0, 'm': 1})
+            df['sex'] = df['sex'].fillna(0) # Default to Female
 
-        # 3. Handle Numeric Missing Values (Impute with Median)
-        # Identify numeric columns (excluding the target 'class')
-        numeric_cols = df.select_dtypes(include=['float64', 'int64']).columns
+        # 6. Clean Boolean Columns
+        # Detect columns that look like booleans or objects that should be booleans
+        for col in df.columns:
+            if col not in numeric_candidates and col != 'class' and col != 'sex':
+                # Map True/False text to 1/0
+                df[col] = df[col].astype(str).str.lower().map({
+                    't': 1, 'f': 0, 'true': 1, 'false': 0, '1': 1, '0': 0
+                })
+                df[col] = df[col].fillna(0)
+
+        # 7. Impute Missing Values (Fill NaNs with Median)
         imputer = SimpleImputer(strategy='median')
-        df[numeric_cols] = imputer.fit_transform(df[numeric_cols])
+        # Select all columns except 'class'
+        feature_cols = [c for c in df.columns if c != 'class']
+        df[feature_cols] = imputer.fit_transform(df[feature_cols])
 
-        # 4. Target Encoding
+        # 8. Encode Target
         le = LabelEncoder()
         df['class'] = le.fit_transform(df['class'])
-
-        # Split Data
-        X = df.drop('class', axis=1)
+        
+        # 9. Train Model
+        X = df[feature_cols]
         y = df['class']
-
-        # Scale Data (Important for KNN)
+        
         scaler = StandardScaler()
         X_scaled = scaler.fit_transform(X)
         
-        # Calculate Accuracy for Transparency
-        X_train, X_test, y_train, y_test = train_test_split(X_scaled, y, test_size=0.2, random_state=42)
-        
         knn = KNeighborsClassifier(n_neighbors=5)
-        knn.fit(X_train, y_train)
-        
-        acc = accuracy_score(y_test, knn.predict(X_test))
-        
-        # Refit on full data for the app
         knn.fit(X_scaled, y)
-
-        return knn, scaler, le, X.columns, acc
+        
+        # Calculate accuracy for display
+        score = knn.score(X_scaled, y)
+        
+        return knn, scaler, le, feature_cols, score
 
     except Exception as e:
         return None, None, None, str(e), 0
 
-# Load the system
-knn, scaler, le, feature_names, accuracy = build_model()
+# Initialize App
+knn, scaler, le, feature_cols, accuracy = load_and_train()
 
-# --- 2. Sidebar Input Section ---
-with st.sidebar:
-    st.image("https://cdn-icons-png.flaticon.com/512/3004/3004458.png", width=100)
-    st.title("Patient Data Input")
-    st.write("Enter patient details below.")
-    
-    st.subheader("1. Demographics")
-    name = st.text_input("Patient Name", "Guest")
-    age = st.slider("Age", 1, 100, 30)
-    sex_label = st.radio("Gender", ["Female", "Male"], horizontal=True)
-    sex = 0 if sex_label == "Female" else 1
-
-    st.subheader("2. Lab Results")
-    st.info("Leave default if unknown (uses population average).")
-    tsh = st.number_input("TSH (Thyroid Stimulating Hormone)", value=1.6)
-    t3 = st.number_input("T3 Level", value=2.0)
-    tt4 = st.number_input("TT4 Level", value=100.0)
-    t4u = st.number_input("T4U Level", value=0.98)
-    fti = st.number_input("FTI Level", value=107.0)
-
-# --- 3. Main Dashboard ---
-st.markdown('<div class="main-header">🏥 Thyroid Disease Prediction System</div>', unsafe_allow_html=True)
+# --- User Interface ---
+st.title("🩺 Thyroid Disease Prediction System")
+st.markdown(f"**System Status:** {'🟢 Online' if knn else '🔴 Offline'}")
 
 if knn is None:
-    st.error(f"⚠️ Critical Error: {feature_names}")
-    st.warning("Ensure 'Thyroid-Dataset.csv' is in the exact same folder as this script.")
+    st.error(f"Error loading data: {feature_cols}")
+    st.info("Please ensure 'Thyroid-Dataset.csv' is in the same folder and is not corrupted.")
     st.stop()
 
-# Display System Status
-col1, col2 = st.columns(2)
-col1.metric("Model Algorithm", "K-Nearest Neighbors")
-col2.metric("Model Precision", f"{accuracy:.1%}")
+st.sidebar.header("Patient Vitals")
+with st.form("entry_form"):
+    st.subheader("1. Patient Details")
+    c1, c2, c3 = st.columns(3)
+    name = c1.text_input("Name")
+    age = c2.number_input("Age", 1, 120, 30)
+    sex_val = c3.selectbox("Gender", ["Female", "Male"])
+    sex = 0 if sex_val == "Female" else 1
 
-st.divider()
+    st.subheader("2. Lab Report Values")
+    st.caption("If a value is unknown, leave it as the default average.")
+    l1, l2, l3, l4, l5 = st.columns(5)
+    tsh = l1.number_input("TSH", value=1.5)
+    t3 = l2.number_input("T3", value=2.0)
+    tt4 = l3.number_input("TT4", value=100.0)
+    t4u = l4.number_input("T4U", value=1.0)
+    fti = l5.number_input("FTI", value=100.0)
 
-# Symptoms Form (Grouped for better UX)
-st.subheader("3. Clinical Symptoms & History")
+    st.subheader("3. Clinical History")
+    h1, h2, h3 = st.columns(3)
+    with h1:
+        on_thyroxine = st.checkbox("On Thyroxine")
+        on_antithyroid = st.checkbox("On Antithyroid Meds")
+        sick = st.checkbox("Sick / Ill")
+        pregnant = st.checkbox("Pregnant")
+    with h2:
+        thyroid_surgery = st.checkbox("Thyroid Surgery History")
+        i131 = st.checkbox("I131 Treatment")
+        lithium = st.checkbox("On Lithium")
+        goitre = st.checkbox("Goitre Present")
+    with h3:
+        tumor = st.checkbox("Tumor Present")
+        hypopituitary = st.checkbox("Hypopituitary")
+        psych = st.checkbox("Psychological Symptoms")
+        
+    submit = st.form_submit_button("Generate Prediction")
 
-col_a, col_b, col_c = st.columns(3)
-
-with col_a:
-    st.markdown("**General Condition**")
-    sick = st.checkbox("Sick / Ill")
-    pregnant = st.checkbox("Pregnant")
-    tumor = st.checkbox("Tumor")
-    goitre = st.checkbox("Goitre (Neck Swelling)")
-
-with col_b:
-    st.markdown("**Medication History**")
-    on_thyroxine = st.checkbox("On Thyroxine")
-    on_antithyroid = st.checkbox("On Antithyroid Meds")
-    lithium = st.checkbox("On Lithium")
-    i131_treatment = st.checkbox("I131 Treatment History")
-
-with col_c:
-    st.markdown("**Clinical Queries**")
-    query_hypo = st.checkbox("Query: Hypothyroid")
-    query_hyper = st.checkbox("Query: Hyperthyroid")
-    psych = st.checkbox("Psychological Symptoms")
-    # Hidden defaults for less common fields to keep UI clean
-    query_on_thyroxine = False
-    thyroid_surgery = False
-    hypopituitary = False
-
-# --- 4. Prediction Logic ---
-if st.button("Analyze & Predict Disease"):
+if submit:
+    # Construct input array matching the TRAINING columns exactly
+    # We create a dictionary first to map values to column names
+    input_dict = {col: 0 for col in feature_cols} # Initialize all with 0
     
-    # Map inputs to features
-    # NOTE: Order must match training data: 
-    # age, sex, on thyroxine, query on thyroxine, on antithyroid medication, sick, pregnant, thyroid surgery, 
-    # I131 treatment, query hypothyroid, query hyperthyroid, lithium, goitre, tumor, hypopituitary, psych, 
-    # TSH, T3, TT4, T4U, FTI
+    # Fill known values
+    input_dict['age'] = age
+    input_dict['sex'] = sex
+    input_dict['tsh'] = tsh
+    input_dict['t3'] = t3
+    input_dict['tt4'] = tt4
+    input_dict['t4u'] = t4u
+    input_dict['fti'] = fti
     
-    input_vector = [
-        age, sex,
-        int(on_thyroxine), int(query_on_thyroxine), int(on_antithyroid),
-        int(sick), int(pregnant), int(thyroid_surgery),
-        int(i131_treatment), int(query_hypo), int(query_hyper),
-        int(lithium), int(goitre), int(tumor),
-        int(hypopituitary), int(psych),
-        tsh, t3, tt4, t4u, fti
-    ]
+    # Fill booleans
+    # Note: Keys must match the lowercased column names from CSV
+    input_dict['on thyroxine'] = int(on_thyroxine)
+    input_dict['on antithyroid medication'] = int(on_antithyroid)
+    input_dict['sick'] = int(sick)
+    input_dict['pregnant'] = int(pregnant)
+    input_dict['thyroid surgery'] = int(thyroid_surgery)
+    input_dict['i131 treatment'] = int(i131)
+    input_dict['lithium'] = int(lithium)
+    input_dict['goitre'] = int(goitre)
+    input_dict['tumor'] = int(tumor)
+    input_dict['hypopituitary'] = int(hypopituitary)
+    input_dict['psych'] = int(psych)
     
-    # Scale and Predict
+    # Convert dictionary to list in correct order
+    input_vector = [input_dict[col] for col in feature_cols]
+    
+    # Predict
     input_scaled = scaler.transform([input_vector])
-    prediction_idx = knn.predict(input_scaled)[0]
-    prediction_label = le.inverse_transform([prediction_idx])[0]
+    pred_idx = knn.predict(input_scaled)[0]
+    pred_label = le.inverse_transform([pred_idx])[0]
     
-    # Display Result
-    st.markdown("---")
-    st.subheader(f"📋 Medical Report for: {name}")
+    # Output
+    st.divider()
+    st.subheader(f"Results for {name}")
     
-    # Dynamic Styling for Result
-    if prediction_label == 'negative':
-        st.success(f"### Diagnosis: {prediction_label.upper()} (Normal)")
-        st.write("No significant thyroid abnormalities detected based on the provided parameters.")
+    if pred_label == 'negative':
+        st.success(f"**Diagnosis: {pred_label.upper()}** (Healthy)")
+        st.write("No thyroid disease detected.")
     else:
-        st.error(f"### Diagnosis: {prediction_label.upper()}")
-        st.write("Potential thyroid disorder detected.")
-    
-    # Detailed Solutions Dictionary
-    solutions = {
-        'negative': ["Maintain a balanced diet rich in iodine.", "Regular annual checkups recommended."],
-        'hypothyroid conditions': ["Consult an Endocrinologist immediately.", "Possible treatment: Levothyroxine replacement therapy.", "Diet: Increase selenium and zinc intake."],
-        'hyperthyroid conditions': ["Consult an Endocrinologist immediately.", "Possible treatment: Antithyroid medications (methimazole) or radioactive iodine.", "Diet: Avoid excessive iodine."],
-        'binding protein': ["This indicates abnormal protein levels binding to thyroid hormones.", "Further specific blood tests required."],
-        'general health': ["Condition may be related to non-thyroid general health factors.", "Consult a General Physician."],
-        'replacement therapy': ["Patient is currently under hormone replacement.", "Monitor TSH levels regularly to adjust dosage."],
-        'miscellaneous': ["Complex clinical presentation.", "Detailed full-body checkup suggested."],
-        'discordant results': ["Lab values contradict each other.", "Redo TSH and T4 tests to confirm."],
-        'antithyroid treatment': ["Patient is undergoing treatment.", "Monitor for side effects of medication."]
+        st.warning(f"**Diagnosis: {pred_label.upper()}**")
+        st.write("Condition detected. Please see the advice below.")
+        
+    # Advice Logic
+    advice = {
+        'negative': "Maintain healthy diet and regular exercise.",
+        'hypothyroid conditions': "Consult an Endocrinologist. TSH levels may be high. Treatment often involves hormone replacement (Levothyroxine).",
+        'hyperthyroid conditions': "Consult an Endocrinologist. TSH levels may be low. Treatment may involve antithyroid drugs.",
+        'binding protein': "Abnormal protein binding detected. This affects total hormone levels but free hormone levels might be normal. Specialist review needed.",
+        'general health': "General health checkup recommended.",
+        'discordant results': "Lab error or inconsistent data. Repeat blood tests.",
+        'replacement therapy': "Patient is on therapy. Continue monitoring."
     }
     
-    st.markdown('<div class="report-box">', unsafe_allow_html=True)
-    st.markdown("**Recommended Actions:**")
-    for step in solutions.get(prediction_label, ["Consult a specialist for a detailed diagnosis."]):
-        st.markdown(f"- {step}")
-    st.markdown('</div>', unsafe_allow_html=True)
+    st.info(f"**Recommendation:** {advice.get(pred_label, 'Consult a doctor for detailed analysis.')}")
